@@ -196,20 +196,12 @@ if [[ "${BASELINE_SKIP_PIP_INSTALL:-0}" != "1" ]]; then
 fi
 
 # -- Choose agent backend ------------------------------------------------
-# GEMINI_API_KEY takes priority (free tier, no Node/Claude install needed).
-# Falls back to original Claude Code if ANTHROPIC_API_KEY is set.
+# ANTHROPIC_API_KEY takes priority (hackathon LiteLLM proxy).
+# Falls back to Gemini for local testing if no Claude key.
 # ------------------------------------------------------------------------
 
-if [[ -n "${GEMINI_API_KEY:-}" ]]; then
-  echo "Using Gemini agent backend (gemini-2.5-flash-lite)" >&2
-  python3 "$SUBMISSION_DIR/scripts/run_gemini_agent.py" \
-    --task "$TASK_DIR" \
-    --output "$OUTPUT_PATH" \
-    --output-dir "$OUTPUT_DIR" \
-    --submission-dir "$SUBMISSION_DIR"
-
-elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-  echo "Using Claude agent backend" >&2
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  echo "Using Claude agent backend (via LiteLLM proxy)" >&2
 
   CLAUDE_BIN="${CLAUDE_CLI_BIN:-claude}"
   if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
@@ -236,7 +228,10 @@ elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     --output-dir "$OUTPUT_DIR" \
     --submission-dir "$SUBMISSION_DIR"
 
-else
-  echo "ERROR: neither GEMINI_API_KEY nor ANTHROPIC_API_KEY is set" >&2
-  exit 127
-fi
+elif [[ -n "${GEMINI_API_KEY:-}" ]]; then
+  echo "Using Gemini agent backend (gemini-2.5-flash-lite)" >&2
+  python3 "$SUBMISSION_DIR/scripts/run_gemini_agent.py" \
+    --task "$TASK_DIR" \
+    --output "$OUTPUT_PATH" \
+    --output-dir "$OUTPUT_DIR" \
+    --submission-dir "$SUBMISSION_DIR"
