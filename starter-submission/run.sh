@@ -195,27 +195,48 @@ if [[ "${BASELINE_SKIP_PIP_INSTALL:-0}" != "1" ]]; then
   fi
 fi
 
-CLAUDE_BIN="${CLAUDE_CLI_BIN:-claude}"
-if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
-  if [[ "${BASELINE_INSTALL_CLAUDE:-1}" == "1" ]]; then
-    if ! command -v npm >/dev/null 2>&1; then
-      install_node_with_npm
+# -- Choose agent backend ------------------------------------------------
+# GEMINI_API_KEY takes priority (free tier, no Node/Claude install needed).
+# Falls back to original Claude Code if ANTHROPIC_API_KEY is set.
+# ------------------------------------------------------------------------
+
+if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+  echo "Using Gemini agent backend (gemini-2.5-flash-lite)" >&2
+  python3 "$SUBMISSION_DIR/scripts/run_gemini_agent.py" \
+    --task "$TASK_DIR" \
+    --output "$OUTPUT_PATH" \
+    --output-dir "$OUTPUT_DIR" \
+    --submission-dir "$SUBMISSION_DIR"
+
+elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  echo "Using Claude agent backend" >&2
+
+  CLAUDE_BIN="${CLAUDE_CLI_BIN:-claude}"
+  if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
+    if [[ "${BASELINE_INSTALL_CLAUDE:-1}" == "1" ]]; then
+      if ! command -v npm >/dev/null 2>&1; then
+        install_node_with_npm
+      fi
+      export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$BASELINE_RUNTIME_DIR/npm-global}"
+      mkdir -p "$NPM_CONFIG_PREFIX"
+      export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
+      npm install -g @anthropic-ai/claude-code
+      CLAUDE_BIN="${CLAUDE_CLI_BIN:-claude}"
+    else
+      echo "claude CLI not found; set BASELINE_INSTALL_CLAUDE=1 or provide CLAUDE_CLI_BIN" >&2
+      exit 127
     fi
-    export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$BASELINE_RUNTIME_DIR/npm-global}"
-    mkdir -p "$NPM_CONFIG_PREFIX"
-    export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
-    npm install -g @anthropic-ai/claude-code
-    CLAUDE_BIN="${CLAUDE_CLI_BIN:-claude}"
-  else
-    echo "claude CLI not found; set BASELINE_INSTALL_CLAUDE=1 or provide CLAUDE_CLI_BIN" >&2
-    exit 127
   fi
+
+  export CLAUDE_CLI_BIN="$CLAUDE_BIN"
+
+  python3 "$SUBMISSION_DIR/scripts/run_claude_agent.py" \
+    --task "$TASK_DIR" \
+    --output "$OUTPUT_PATH" \
+    --output-dir "$OUTPUT_DIR" \
+    --submission-dir "$SUBMISSION_DIR"
+
+else
+  echo "ERROR: neither GEMINI_API_KEY nor ANTHROPIC_API_KEY is set" >&2
+  exit 127
 fi
-
-export CLAUDE_CLI_BIN="$CLAUDE_BIN"
-
-python3 "$SUBMISSION_DIR/scripts/run_claude_agent.py" \
-  --task "$TASK_DIR" \
-  --output "$OUTPUT_PATH" \
-  --output-dir "$OUTPUT_DIR" \
-  --submission-dir "$SUBMISSION_DIR"
