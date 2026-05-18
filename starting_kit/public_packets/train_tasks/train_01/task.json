@@ -1,0 +1,39 @@
+{
+  "task_id": "scienceai_colored_digit_domain_generalization",
+  "track": "science_of_ai_ml",
+  "title": "Colored Digit Domain Generalization",
+  "problem_type": "binary_classification",
+  "metric": "heldout_accuracy",
+  "target": {
+    "name": "label",
+    "description": "Noisy binary digit class for held-out colored handwritten digit images."
+  },
+  "input_files": {
+    "train": "data/train.csv",
+    "train_source0": "data/train_source0.csv",
+    "train_source1": "data/train_source1.csv",
+    "test": "data/test.csv",
+    "images": "data/images.zip"
+  },
+  "output": {
+    "file": "predictions.csv",
+    "columns": ["id", "prediction"]
+  },
+  "scoring": {
+    "program": "scoring",
+    "command": "python /app/program/score.py /app/input/res /app/input/ref /app/output",
+    "evaluation_mode": "hidden_reference_predictions",
+    "scores": [
+      {"key": "score", "title": "Score", "sorting": "desc", "primary": true},
+      {"key": "metric_value", "title": "Held-out Accuracy", "sorting": "desc"},
+      {"key": "improvement", "title": "Improvement", "sorting": "desc"}
+    ]
+  },
+  "feature_descriptions": {
+    "id": "Unique example identifier.",
+    "image_path": "Member path inside data/images.zip. If the archive is extracted at the task root, this is also the image path on disk.",
+    "label": "Training label; omitted from test rows."
+  },
+  "domain_background": "Train on labeled source domains and predict binary labels for a held-out domain under a visual distribution shift.",
+  "allowed_external_resources": "Use public machine-learning and package documentation. Do not use hidden reference files."
+}

@@ -1,0 +1,87 @@
+{
+  "baseline": 0.5,
+  "direction": "higher",
+  "domainbed_alignment": {
+    "environment_color_flip_probabilities": [
+      0.1,
+      0.2,
+      0.9
+    ],
+    "holdout_fraction": 0.2,
+    "metric_split": "heldout environment in-split",
+    "test_environment_index": 2
+  },
+  "environment_summaries": [
+    {
+      "color_counts_in_split": {
+        "0": 9214,
+        "1": 9454
+      },
+      "color_flip_probability": 0.1,
+      "env_index": 0,
+      "heldout_fraction": 0.2,
+      "label_counts_in_split": {
+        "0": 9203,
+        "1": 9465
+      },
+      "label_noise_probability": 0.25,
+      "nominal_color_label_alignment": 0.9,
+      "source_size_before_holdout": 23334,
+      "visible_in_split_size": 18668,
+      "visible_train_labels": 18668
+    },
+    {
+      "color_counts_in_split": {
+        "0": 9313,
+        "1": 9354
+      },
+      "color_flip_probability": 0.2,
+      "env_index": 1,
+      "heldout_fraction": 0.2,
+      "label_counts_in_split": {
+        "0": 9258,
+        "1": 9409
+      },
+      "label_noise_probability": 0.25,
+      "nominal_color_label_alignment": 0.8,
+      "source_size_before_holdout": 23333,
+      "visible_in_split_size": 18667,
+      "visible_train_labels": 18667
+    },
+    {
+      "color_counts_in_split": {
+        "0": 9436,
+        "1": 9231
+      },
+      "color_flip_probability": 0.9,
+      "env_index": 2,
+      "heldout_fraction": 0.2,
+      "label_counts_in_split": {
+        "0": 9273,
+        "1": 9394
+      },
+      "label_noise_probability": 0.25,
+      "nominal_color_label_alignment": 0.09999999999999998,
+      "source_size_before_holdout": 23333,
+      "visible_in_split_size": 18667,
+      "visible_train_labels": 0
+    }
+  ],
+  "evaluation_mode": "binary_classification_accuracy",
+  "heldout_environment": "env_index_2_in_split",
+  "ideal": 1.0,
+  "image_color_rule": "two-channel digit image; color = noisy_label XOR Bernoulli(environment_color_flip_probability)",
+  "label_rule": "noisy binary label = (digit < 5) XOR Bernoulli(0.25)",
+  "metric": "heldout_accuracy",
+  "num_test": 18667,
+  "num_train": 37335,
+  "score_formula": "score = clip((heldout_accuracy - 0.5) / 0.5, 0, 1)",
+  "seed": 0,
+  "source_dataset": "MNIST handwritten digit images packaged as a public npz mirror",
+  "source_download": "https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz",
+  "source_environment_files": [
+    "data/train_source0.csv",
+    "data/train_source1.csv"
+  ],
+  "task_id": "scienceai_colored_digit_domain_generalization"
+}
