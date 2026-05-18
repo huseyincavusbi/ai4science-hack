@@ -885,3 +885,35 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# Safety net fallback
+def _write_fallback(workspace_task_dir, output_path, task_config):
+    import csv, math
+    train_csv = workspace_task_dir / "data" / "train.csv"
+    test_csv = workspace_task_dir / "data" / "test.csv"
+    if not test_csv.is_file():
+        raise FileNotFoundError("test.csv not found")
+    _, test_rows = read_csv_rows(test_csv)
+    _, train_rows = read_csv_rows(train_csv) if train_csv.is_file() else ([], [])
+    target_col = str(task_config.get("target", {}).get("name", "label") if isinstance(task_config.get("target"), dict) else "label")
+    val = 0.0
+    if train_rows and target_col in train_rows[0]:
+        vals = [float(r.get(target_col, 0)) for r in train_rows if r.get(target_col, "").strip()]
+        if vals:
+            pt = str(task_config.get("problem_type", ""))
+            val = max(set(vals), key=vals.count) if "classification" in pt else sum(vals) / len(vals)
+    cols = output_columns_from_task(task_config) or ["id", "prediction"]
+    sample = workspace_task_dir / "sample_submission.csv"
+    if sample.is_file():
+        sc, _ = read_csv_rows(sample)
+        if sc: cols = sc
+    with output_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for row in test_rows:
+            rid = row.get("id", "").strip()
+            if rid:
+                out = {cols[0]: rid}
+                for c in cols[1:]:
+                    out[c] = str(val)
+                w.writerow(out)
