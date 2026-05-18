@@ -15,3 +15,5 @@ claude_nonzero_exit.txt
 claude_science_ai_workspace/
 eval-runs/
 .eval-runs/
+
+.env.secrets

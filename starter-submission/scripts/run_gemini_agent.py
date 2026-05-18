@@ -4,14 +4,16 @@
 Identical contract to run_claude_agent.py:
   --task TASK_DIR --output OUTPUT_PATH --output-dir OUTPUT_DIR --submission-dir SUBMISSION_DIR
 
-Uses gemini-2.5-flash-lite (free tier). When ANTHROPIC_API_KEY is available,
-switch back to run_claude_agent.py with zero code changes.
+Uses gemini-2.5-flash-lite (free tier) via google-genai SDK.
+Falls back to gemini-2.0-flash if the primary model is overloaded (503).
+When ANTHROPIC_API_KEY is available, switch back to run_claude_agent.py with zero code changes.
 
 Differences from the Claude baseline:
   - Detects problem type + data modality, injects ML strategy guidance
   - Tool-use loop: read_file / run_command / write_file / finish
   - 50 turn budget (vs 30)
   - Retry on validation failure with error feedback
+  - Model fallback on overload
   - No Node.js or Claude Code dependency
 """
 from __future__ import annotations
@@ -627,61 +629,88 @@ def run_gemini_loop(
     output_dir: Path,
     log_path: Path,
 ) -> bool:
-    import google.generativeai as genai
-    from google.generativeai import types as t
+    from google import genai
+    from google.genai import types
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         raise ValueError("GEMINI_API_KEY not set")
 
-    genai.configure(api_key=api_key)
     model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
     max_turns = int(os.environ.get("AGENT_MAX_TURNS", "50"))
+    model_fallback = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.0-flash")
 
-    tool_decl = t.Tool(function_declarations=[
-        t.FunctionDeclaration(
+    client = genai.Client(api_key=api_key)
+
+    tool_decl = types.Tool(function_declarations=[
+        types.FunctionDeclaration(
             name="read_file",
             description="Read a file or list a directory. Use to examine task.md, task.json, data files, or check output.",
-            parameters=t.Schema(type=t.Type.OBJECT, properties={
-                "path": t.Schema(type=t.Type.STRING, description="Path, e.g. 'task/task.md' or 'data/train.csv'")
-            }, required=["path"]),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={"path": types.Schema(type=types.Type.STRING, description="Path, e.g. 'task/task.md' or 'data/train.csv'")},
+                required=["path"],
+            ),
         ),
-        t.FunctionDeclaration(
+        types.FunctionDeclaration(
             name="run_command",
             description="Execute a bash command in the workspace. Use for data exploration or running training scripts.",
-            parameters=t.Schema(type=t.Type.OBJECT, properties={
-                "command": t.Schema(type=t.Type.STRING, description="Bash command to execute")
-            }, required=["command"]),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={"command": types.Schema(type=types.Type.STRING, description="Bash command to execute")},
+                required=["command"],
+            ),
         ),
-        t.FunctionDeclaration(
+        types.FunctionDeclaration(
             name="write_file",
             description="Write or overwrite a file. Use to create Python scripts and output csv files.",
-            parameters=t.Schema(type=t.Type.OBJECT, properties={
-                "path": t.Schema(type=t.Type.STRING, description="File path, e.g. 'train_model.py' or 'predictions.csv'"),
-                "content": t.Schema(type=t.Type.STRING, description="Full file contents"),
-            }, required=["path", "content"]),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "path": types.Schema(type=types.Type.STRING, description="File path, e.g. 'train_model.py' or 'predictions.csv'"),
+                    "content": types.Schema(type=types.Type.STRING, description="Full file contents"),
+                },
+                required=["path", "content"],
+            ),
         ),
-        t.FunctionDeclaration(
+        types.FunctionDeclaration(
             name="finish",
             description="Signal task completion after writing and validating output files.",
-            parameters=t.Schema(type=t.Type.OBJECT, properties={
-                "summary": t.Schema(type=t.Type.STRING, description="Brief summary of approach and results")
-            }, required=["summary"]),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={"summary": types.Schema(type=types.Type.STRING, description="Brief summary of approach and results")},
+                required=["summary"],
+            ),
         ),
     ])
 
-    model = genai.GenerativeModel(model_name=model_name, system_instruction=system_instruction, tools=[tool_decl])
-    chat = model.start_chat(enable_automatic_function_calling=False)
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        tools=[tool_decl],
+    )
 
     with log_path.open("w", encoding="utf-8") as log:
-        log.write(f"Model: {model_name} | Max turns: {max_turns}\n\n=== START ===\n\n")
+        log.write(f"Model: {model_name} | Fallback: {model_fallback} | Max turns: {max_turns}\n\n=== START ===\n\n")
         log.flush()
 
-        try:
-            response = chat.send_message(task_prompt)
-        except Exception as exc:
-            log.write(f"INIT ERROR: {exc}\n")
-            return False
+        for attempt_model in (model_name, model_fallback):
+            try:
+                chat = client.chats.create(model=attempt_model, config=config)
+                response = chat.send_message(task_prompt)
+                active_model = attempt_model
+                break
+            except Exception as exc:
+                log.write(f"Model {attempt_model} failed: {exc}\n")
+                if attempt_model == model_name:
+                    log.write(f"Falling back to {model_fallback}...\n")
+                    time.sleep(2)
+                    continue
+                log.write("All model attempts failed.\n")
+                return False
+
+        log.write(f"Using model: {active_model}\n\n")
+        log.flush()
+        print(f"[Gemini] Using {active_model}", flush=True)
 
         turn = 0
         for turn in range(1, max_turns + 1):
@@ -697,9 +726,9 @@ def run_gemini_loop(
                 break
 
             for part in cand.content.parts:
-                if hasattr(part, "function_call") and part.function_call is not None:
+                if part.function_call is not None:
                     fcs.append(part.function_call)
-                elif hasattr(part, "text") and part.text:
+                elif part.text:
                     texts.append(part.text)
 
             if texts:
@@ -740,7 +769,7 @@ def run_gemini_loop(
                 log.write(f"({dt:.1f}s) {result[:2000]}\n")
                 log.flush()
 
-                responses.append(t.Part.from_function_response(name=name, response={"result": result[:MAX_RESULT_CHARS]}))
+                responses.append(types.Part.from_function_response(name=name, response={"result": result[:MAX_RESULT_CHARS]}))
 
             try:
                 response = chat.send_message(responses)
