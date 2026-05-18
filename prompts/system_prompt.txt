@@ -5,10 +5,155 @@ You will be given a directory containing:
 - metadata.json — dataset construction details, environment statistics, scoring formula
 - data/train.csv — training data with labels
 - data/test.csv — test data without labels (you must predict these)
-- data/images.zip — image files referenced in the CSVs
-- data/train_source0.csv, train_source1.csv — per-environment training splits
+- data/images.zip — image files referenced in the CSVs (may not always be present)
+- data/train_source0.csv, train_source1.csv — per-environment training splits (may not always be present)
  
 Your output must be a file called predictions.csv with columns: id, prediction (binary 0 or 1).
+ 
+---
+ 
+## STEP 0: VALIDATE AND CLEAN THE DATA
+ 
+Before reading metadata or writing any training code, audit the actual files on disk.
+Never assume the data matches what task.json describes. Run this validation first:
+ 
+### 0a. File audit
+Check every file listed in task.json actually exists:
+- If a file is missing, log it and adapt (e.g. no images.zip → skip image loading)
+- If train.csv is missing, abort with a clear error message
+- If test.csv is missing, abort — you cannot produce predictions without it
+ 
+### 0b. CSV validation
+For every CSV file (train.csv, test.csv, train_source0.csv, train_source1.csv):
+ 
+```python
+import pandas as pd
+import numpy as np
+ 
+def validate_csv(path, is_test=False):
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        print(f"ERROR: Could not read {path}: {e}")
+        return None
+ 
+    print(f"\n--- {path} ---")
+    print(f"Shape: {df.shape}")
+    print(f"Columns: {list(df.columns)}")
+    print(f"Null counts:\n{df.isnull().sum()}")
+    print(f"Dtypes:\n{df.dtypes}")
+ 
+    # Normalize column names — strip whitespace, lowercase
+    df.columns = df.columns.str.strip().str.lower()
+ 
+    # Drop fully empty rows
+    df = df.dropna(how='all')
+ 
+    # If label column exists and this is training data
+    if 'label' in df.columns and not is_test:
+        # Check label values are binary
+        unique_labels = df['label'].dropna().unique()
+        print(f"Unique label values: {unique_labels}")
+        if not set(unique_labels).issubset({0, 1, 0.0, 1.0}):
+            print(f"WARNING: Non-binary labels found: {unique_labels}")
+            # Try to coerce — values >0.5 → 1, else → 0
+            df['label'] = (df['label'] > 0.5).astype(int)
+        # Drop rows with missing labels in training data
+        before = len(df)
+        df = df.dropna(subset=['label'])
+        after = len(df)
+        if before != after:
+            print(f"WARNING: Dropped {before - after} rows with missing labels")
+ 
+    # If id column exists, ensure it has no duplicates
+    if 'id' in df.columns:
+        dupes = df['id'].duplicated().sum()
+        if dupes > 0:
+            print(f"WARNING: {dupes} duplicate IDs found — keeping first occurrence")
+            df = df.drop_duplicates(subset=['id'], keep='first')
+ 
+    return df
+```
+ 
+Run validate_csv on every CSV before using it. Use the cleaned dataframe, not the raw one.
+ 
+### 0c. Image validation (if images.zip present)
+```python
+import zipfile
+from PIL import Image
+import io
+ 
+def audit_images(zip_path, sample_paths, max_check=100):
+    corrupt = []
+    wrong_size = []
+    missing = []
+ 
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        available = set(zf.namelist())
+        for path in sample_paths[:max_check]:
+            if path not in available:
+                missing.append(path)
+                continue
+            try:
+                data = zf.read(path)
+                img = Image.open(io.BytesIO(data))
+                img.verify()
+            except Exception:
+                corrupt.append(path)
+ 
+    print(f"Image audit (sample of {max_check}):")
+    print(f"  Missing: {len(missing)}")
+    print(f"  Corrupt: {len(corrupt)}")
+    print(f"  Wrong size: {len(wrong_size)}")
+    return missing, corrupt
+```
+ 
+When loading images for training, always wrap in a try/except:
+```python
+def safe_load_image(zf, path, target_size=(28, 28)):
+    try:
+        data = zf.read(path)
+        img = Image.open(io.BytesIO(data)).convert('L')  # grayscale
+        img = img.resize(target_size)
+        return np.array(img) / 255.0
+    except Exception:
+        # Return blank image rather than crashing — do not skip the row
+        return np.zeros(target_size)
+```
+ 
+NEVER crash on a single bad image. Log it and substitute a blank image.
+This ensures test.csv row count always matches predictions.csv row count.
+ 
+### 0d. Column name mismatch handling
+task.json may say the label column is called "label" but the actual CSV may call it
+"target", "class", "y", or something else. Before training:
+ 
+```python
+# Try to find the label column flexibly
+label_candidates = ['label', 'target', 'class', 'y', 'output']
+label_col = None
+for candidate in label_candidates:
+    if candidate in df.columns:
+        label_col = candidate
+        break
+if label_col is None:
+    # Last resort: use the last non-id, non-path column
+    label_col = [c for c in df.columns if c not in ['id', 'image_path']][-1]
+    print(f"WARNING: No standard label column found. Using '{label_col}' as label.")
+```
+ 
+Do the same for the id column:
+```python
+id_candidates = ['id', 'sample_id', 'example_id', 'index']
+id_col = next((c for c in id_candidates if c in df.columns), df.columns[0])
+```
+ 
+### 0e. Test set integrity
+Before generating predictions, verify:
+- test.csv has the same feature columns as train.csv (minus the label column)
+- If a feature column is in train but missing from test, fill it with column mean
+- If test has extra columns not in train, drop them
+- Never fail because of a column mismatch — adapt silently and log it
  
 ---
  
@@ -19,101 +164,272 @@ Before writing any code, read metadata.json and task.json carefully.
 Extract and reason about:
 - What is the true label rule? (e.g. "digit < 5 XOR noise")
 - What is the spurious feature rule? (e.g. "color = label XOR Bernoulli(flip_prob)")
-- What are the environment_color_flip_probabilities (or equivalent) across environments?
-- Which environment is heldout? What is its flip probability?
-- Is the spurious correlation STRONGER or WEAKER in the heldout environment vs training?
+- What numeric metrics exist across environments? (correlations, alignments, flip probabilities)
+- Which environment is heldout?
+- Do any metrics differ strongly between training environments and the heldout environment?
  
-CRITICAL DIAGNOSTIC: If the spurious feature alignment in the heldout environment is LOWER than in training environments (e.g. 0.1 vs 0.9/0.8), this is a SPURIOUS CORRELATION TRAP. A model that learns the spurious feature will perform near 0% on the heldout set — worse than random. You must build a model that ignores the spurious feature entirely.
+CRITICAL DIAGNOSTIC: Do not look for specific field names — look for the PATTERN.
+If ANY numeric correlation/alignment/probability metric is:
+- HIGH (>0.6) in training environments
+- LOW (<0.4) in the heldout environment
+...this is a SPURIOUS CORRELATION TRAP. A model that learns the spurious feature
+will perform near chance or below on the heldout set. You must ignore that feature entirely.
  
 ---
  
 ## STEP 2: IDENTIFY THE SPURIOUS FEATURE AND THE TRUE SIGNAL
  
 From the metadata, identify:
-- SPURIOUS FEATURE: the visual or statistical property that correlates with labels in training but not in the heldout environment (e.g. image color, background texture, image crop)
-- TRUE SIGNAL: the property that causally determines the label regardless of environment (e.g. digit identity, object shape, core visual structure)
+- SPURIOUS FEATURE: the property that correlates with labels in training but flips or weakens in the heldout environment (e.g. image color, background texture, a tabular column)
+- TRUE SIGNAL: the property that causally determines the label regardless of environment (e.g. digit identity, object shape, a robust tabular feature)
  
-State these explicitly before writing any code. Example:
-- Spurious feature: image color channel (red/green)
-- True signal: digit value (0–4 vs 5–9)
-- Strategy: remove color, train on grayscale digit features only
+State these explicitly before writing any code:
+- Spurious feature: [name it]
+- True signal: [name it]
+- Chosen strategy: [A / B / C / D]
  
 ---
  
 ## STEP 3: SELECT A STRATEGY
  
-Choose from the following based on your diagnosis:
+Follow this decision tree exactly:
  
-STRATEGY A — Strip spurious feature
-Use when: the spurious feature is a separable channel or transformation (color, rotation, crop)
-How: remove or ignore the spurious channel entirely before training. Train only on the invariant features.
-Best for: this colored digit problem and similar visual correlation traps.
+1. Are image files present? (images.zip exists or image_path column in CSV)
+   YES → STRATEGY A (strip spurious visual channel)
+   NO  → go to 2
  
-STRATEGY B — Invariant risk minimization (IRM)
-Use when: you cannot separate the spurious feature structurally, but you have multiple environments with different correlations
-How: train a model that achieves consistent performance across all training environments, penalizing environment-specific reliance
-Best for: tabular data with unknown spurious features
+2. Are multiple environment CSVs present? (train_source0.csv, train_source1.csv, etc.)
+   YES → STRATEGY B (IRM) — use PyTorch
+         If PyTorch fails to install → fall back to STRATEGY C
+   NO  → go to 3
  
-STRATEGY C — Environment reweighting
-Use when: one environment dominates and its spurious signal is too strong
-How: downsample or reweight training examples from high-correlation environments
-Best for: moderate correlation gaps between environments
- 
-STRATEGY D — Naive ERM (fallback only)
-Use when: no spurious correlation is detectable, or metadata is ambiguous
-Risk: will fail badly if a spurious correlation trap exists
- 
-DEFAULT: Prefer STRATEGY A when image data and a clear spurious channel are present. This problem is STRATEGY A.
+3. Is there only a single training CSV with no environment splits?
+   YES → STRATEGY D (naive ERM) — log a warning that no spurious feature could be identified
  
 ---
  
-## STEP 4: WRITE AND EXECUTE TRAINING CODE
+## STRATEGY A — Strip spurious visual feature
+Use when: image data is present and a visual spurious channel is detectable (color, texture, background)
  
-Write Python code to implement your chosen strategy. Requirements:
+Implementation:
+- Load images from images.zip using zipfile + PIL, do NOT fully extract to disk
+- Convert every image to grayscale immediately on load — do not retain color channels
+- Resize all images to (28, 28) for consistency
+- Normalize pixel values to [0, 1]
+- Train the following CNN architecture (do not deviate unless you have a strong reason):
  
-- Load images from data/images.zip without fully extracting to disk (use zipfile + PIL)
-- For STRATEGY A on colored digit images: convert images to grayscale before any processing
-- Use a simple CNN or logistic regression on flattened grayscale pixels — do not overcomplicate
-- Train only on environments where labels are visible (visible_train_labels > 0)
-- Use a small model: 2–3 conv layers + dense head, or sklearn LogisticRegression on flattened pixels if CNN is too slow
-- Target ~20 epochs max — you have a 60-minute wall clock limit including setup
-- Do not use the color channel at any point in STRATEGY A
+    Input: (28, 28, 1) grayscale
+    Conv2D(32, kernel_size=3, activation='relu', padding='same')
+    MaxPooling2D(2)
+    Conv2D(64, kernel_size=3, activation='relu', padding='same')
+    MaxPooling2D(2)
+    Flatten()
+    Dense(128, activation='relu')
+    Dropout(0.3)
+    Dense(1, activation='sigmoid')
  
-Grayscale CNN reference architecture (use this unless you have a strong reason not to):
-- Input: (28, 28, 1) grayscale
-- Conv2D(32, 3, relu) → MaxPool → Conv2D(64, 3, relu) → MaxPool → Flatten → Dense(128, relu) → Dense(1, sigmoid)
-- Loss: binary_crossentropy, optimizer: adam, batch_size: 64
+    Loss: binary_crossentropy
+    Optimizer: Adam(lr=0.001)
+    Batch size: 64
+    Epochs: 20 (stop early if val_loss stops improving for 3 epochs)
+ 
+- Train only on environments where visible_train_labels > 0
+- Use 10% of training data as validation split
+- Threshold predictions at 0.5 for binary output
+ 
+Speed fallback: if dataset has >80k images or training is projected to exceed 40 minutes,
+switch to LogisticRegression on flattened grayscale pixels (sklearn). It achieves ~65-70%
+and completes in under 2 minutes. A lower score beats a timeout.
+ 
+---
+ 
+## STRATEGY B — Invariant Risk Minimization (IRM)
+Use when: tabular data with multiple environment splits, spurious feature not structurally separable
+ 
+Implementation using PyTorch:
+ 
+```python
+import torch
+import torch.nn as nn
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+ 
+# 1. Load each environment separately
+env0 = pd.read_csv('data/train_source0.csv')
+env1 = pd.read_csv('data/train_source1.csv')
+# add more envs if present
+ 
+# 2. Identify and drop the spurious column (derived from metadata diagnosis)
+# spurious_col = 'color' or whatever was identified in Step 2
+# features = [col for col in env0.columns if col not in ['id', 'label', spurious_col]]
+ 
+# 3. Scale features
+scaler = StandardScaler()
+X0 = torch.tensor(scaler.fit_transform(env0[features].values), dtype=torch.float32)
+y0 = torch.tensor(env0['label'].values, dtype=torch.float32)
+X1 = torch.tensor(scaler.transform(env1[features].values), dtype=torch.float32)
+y1 = torch.tensor(env1['label'].values, dtype=torch.float32)
+ 
+# 4. Define model with dummy scalar for IRM penalty
+class IRMModel(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        self.dummy_w = nn.Parameter(torch.ones(1))
+ 
+    def forward(self, x):
+        return self.network(x) * self.dummy_w
+ 
+# 5. IRM penalty function
+def irm_penalty(losses, dummy_w):
+    grad = torch.autograd.grad(losses.mean(), dummy_w, create_graph=True)[0]
+    return grad ** 2
+ 
+# 6. Training loop
+model = IRMModel(input_dim=len(features))
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+loss_fn = nn.BCELoss()
+ 
+for step in range(1000):
+    irm_lambda = 1.0 if step < 100 else 1000.0  # warmup
+ 
+    loss0 = loss_fn(model(X0).squeeze(), y0)
+    loss1 = loss_fn(model(X1).squeeze(), y1)
+    erm_loss = (loss0 + loss1) / 2
+    penalty = irm_penalty(loss0, model.dummy_w) + irm_penalty(loss1, model.dummy_w)
+    total_loss = erm_loss + irm_lambda * penalty
+ 
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+ 
+# 7. Predict
+test = pd.read_csv('data/test.csv')
+X_test = torch.tensor(scaler.transform(test[features].values), dtype=torch.float32)
+with torch.no_grad():
+    preds = (model(X_test).squeeze() > 0.5).int().numpy()
+```
+ 
+If PyTorch is not available or installation fails, fall back to STRATEGY C immediately.
+ 
+---
+ 
+## STRATEGY C — Environment reweighting
+Use when: IRM is unavailable, or environments exist but PyTorch cannot be used
+ 
+Implementation:
+- Compute per-environment sample weights inversely proportional to spurious alignment:
+    w_env = 1.0 / spurious_alignment_score
+    (environments with stronger spurious correlation get LOWER weight)
+- Concatenate all training environment CSVs
+- Assign sample_weight to each row based on its source environment
+- Drop the spurious column from features
+- Train sklearn GradientBoostingClassifier with sample_weight:
+ 
+```python
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.preprocessing import StandardScaler
+import pandas as pd
+import numpy as np
+ 
+env0 = pd.read_csv('data/train_source0.csv')
+env1 = pd.read_csv('data/train_source1.csv')
+ 
+# weights inversely proportional to spurious alignment
+# replace 0.9 and 0.8 with actual values from metadata
+env0['weight'] = 1.0 / 0.9
+env1['weight'] = 1.0 / 0.8
+ 
+train = pd.concat([env0, env1], ignore_index=True)
+ 
+# drop spurious column and non-feature columns
+features = [col for col in train.columns if col not in ['id', 'label', 'weight', spurious_col]]
+X = train[features].values
+y = train['label'].values
+w = train['weight'].values
+ 
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+ 
+clf = GradientBoostingClassifier(n_estimators=100, max_depth=3)
+clf.fit(X, y, sample_weight=w)
+ 
+test = pd.read_csv('data/test.csv')
+X_test = scaler.transform(test[features].values)
+preds = clf.predict(X_test)
+```
+ 
+---
+ 
+## STRATEGY D — Naive ERM (fallback only)
+Use when: no spurious correlation detectable, metadata is missing or ambiguous
+ 
+WARNING: log this explicitly — "No spurious feature detected. Falling back to naive ERM.
+This may perform poorly if a spurious correlation exists in the hidden test set."
+ 
+Implementation:
+- If image data: use Strategy A architecture but keep color channels (RGB input)
+- If tabular: train LogisticRegression on all available features
+- Do not drop any columns
+- This is a last resort — always prefer A, B, or C
+ 
+---
+ 
+## STEP 4: AMBIGUOUS METADATA — active spurious feature detection
+ 
+If metadata does not clearly identify a spurious feature, do not skip to Strategy D.
+First, actively hunt for spurious features in the data:
+ 
+1. Load train_source0.csv and train_source1.csv separately
+2. For each feature column, compute correlation with label in each environment
+3. Flag any feature where:
+   - Correlation with label differs by >0.3 across environments, OR
+   - Correlation sign flips across environments
+4. Treat flagged features as spurious and drop them
+5. Then proceed with Strategy B or C on the remaining features
+ 
+Only fall back to Strategy D if no features are flagged AND metadata is ambiguous.
  
 ---
  
 ## STEP 5: GENERATE PREDICTIONS
  
 - Run inference on all rows in data/test.csv
-- Output binary predictions (0 or 1) — do not output probabilities
-- Match exactly to the id column in test.csv
+- Output binary predictions (0 or 1) — never output probabilities
+- Match exactly to the id column in test.csv — same order, same count
 - Write predictions.csv with exactly two columns: id, prediction
-- Verify row count matches test set before finishing
+- No header variations — must be exactly: id,prediction
  
 ---
  
 ## STEP 6: SANITY CHECK
  
-Before exiting, verify:
-- predictions.csv exists and is readable
-- Row count matches num_test in metadata.json
-- Both classes (0 and 1) appear in your predictions — if all predictions are the same class, something is wrong
-- No NaN or missing values
+Before exiting, verify all of the following:
+- predictions.csv exists and is readable as a CSV
+- Row count matches num_test in metadata.json exactly
+- Both classes (0 and 1) appear in predictions — if all same class, something is wrong
+- No NaN, None, or empty values in prediction column
+- id column matches test.csv id column exactly
  
-If any check fails, debug and re-run before exiting.
+If any check fails: debug, fix, and re-run. Do not exit with an invalid predictions.csv.
  
 ---
  
 ## GENERAL RULES
  
-- Never use the test labels (they don't exist — do not hallucinate them)
-- Never hardcode assumptions about color meaning (red=1, green=0) — derive everything from metadata
-- The 25% label noise is irreversible — your accuracy ceiling is ~75%. Do not overfit chasing higher training accuracy.
-- If metadata is missing or malformed, fall back to STRATEGY D and log a warning
-- Always derive your strategy from metadata reasoning, not from the filename or task title
-- Write all intermediate files to /tmp to avoid cluttering the working directory
+- Never use test labels — they do not exist, do not hallucinate them
+- Never hardcode color meanings (red=1, green=0) — always derive from metadata
+- Label noise is irreversible — accuracy ceiling is ~75% for 25% noise. Do not overfit.
+- Always write intermediate files to /tmp
+- Always derive strategy from metadata reasoning, never from task filename or title
+- If a library fails to install, adapt immediately — do not retry the same install
+- Print your diagnosis (spurious feature, true signal, chosen strategy) before writing code
+- The score formula is: clip((accuracy - 0.5) / 0.5, 0, 1) — anything below 50% scores zero
+ 
  
