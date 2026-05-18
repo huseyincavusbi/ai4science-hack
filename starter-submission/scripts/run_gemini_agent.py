@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""Autonomous ML research agent backed by Gemini API with function-calling tool loop.
+"""Autonomous ML research agent — LLM-agnostic via OpenAI-compatible API.
 
 Identical contract to run_claude_agent.py:
   --task TASK_DIR --output OUTPUT_PATH --output-dir OUTPUT_DIR --submission-dir SUBMISSION_DIR
 
-Uses gemini-2.5-flash-lite (free tier) via google-genai SDK.
-Falls back to gemini-2.0-flash if the primary model is overloaded (503).
-When ANTHROPIC_API_KEY is available, switch back to run_claude_agent.py with zero code changes.
+Supports any OpenAI-compatible endpoint:
+  - Hackathon LiteLLM proxy (Claude via Bedrock)
+  - Gemini via OpenAI-compatible mode
+  - Any OpenAI-compatible provider
+
+Set via env:
+  LLM_API_KEY          — API key (required)
+  LLM_BASE_URL         — Base URL (default: https://api.openai.com/v1)
+  LLM_MODEL            — Model name (default: bedrock-claude-sonnet)
+  LLM_MAX_TURNS        — Max tool-use turns (default: 50)
 
 Differences from the Claude baseline:
   - Detects problem type + data modality, injects ML strategy guidance
   - Tool-use loop: read_file / run_command / write_file / finish
   - 50 turn budget (vs 30)
   - Retry on validation failure with error feedback
-  - Model fallback on overload
   - No Node.js or Claude Code dependency
 """
 from __future__ import annotations
@@ -622,129 +628,158 @@ def _tool_write_file(path_str: str, content: str, workspace_dir: Path) -> str:
     return f"OK: wrote {len(content)} chars to {p}"
 
 
-def run_gemini_loop(
+def run_agent_loop(
     system_instruction: str,
     task_prompt: str,
     workspace_dir: Path,
     output_dir: Path,
     log_path: Path,
 ) -> bool:
-    from google import genai
-    from google.genai import types
+    """Agent loop using OpenAI-compatible function calling."""
+    from openai import OpenAI
 
-    api_key = os.environ.get("GEMINI_API_KEY", "")
+    api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    base_url = os.environ.get("LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    model = os.environ.get("LLM_MODEL", "bedrock-claude-sonnet")
+    max_turns = int(os.environ.get("LLM_MAX_TURNS", "50"))
+
     if not api_key:
-        raise ValueError("GEMINI_API_KEY not set")
+        raise ValueError("LLM_API_KEY or OPENAI_API_KEY not set")
 
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
-    max_turns = int(os.environ.get("AGENT_MAX_TURNS", "50"))
-    model_fallback = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.0-flash")
+    client = OpenAI(api_key=api_key, base_url=base_url)
 
-    client = genai.Client(api_key=api_key)
-
-    tool_decl = types.Tool(function_declarations=[
-        types.FunctionDeclaration(
-            name="read_file",
-            description="Read a file or list a directory. Use to examine task.md, task.json, data files, or check output.",
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={"path": types.Schema(type=types.Type.STRING, description="Path, e.g. 'task/task.md' or 'data/train.csv'")},
-                required=["path"],
-            ),
-        ),
-        types.FunctionDeclaration(
-            name="run_command",
-            description="Execute a bash command in the workspace. Use for data exploration or running training scripts.",
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={"command": types.Schema(type=types.Type.STRING, description="Bash command to execute")},
-                required=["command"],
-            ),
-        ),
-        types.FunctionDeclaration(
-            name="write_file",
-            description="Write or overwrite a file. Use to create Python scripts and output csv files.",
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "path": types.Schema(type=types.Type.STRING, description="File path, e.g. 'train_model.py' or 'predictions.csv'"),
-                    "content": types.Schema(type=types.Type.STRING, description="Full file contents"),
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file or list a directory. Use to examine task.md, task.json, data files, or check output.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path relative to workspace, e.g. 'task/task.md' or 'data/train.csv'",
+                        }
+                    },
+                    "required": ["path"],
                 },
-                required=["path", "content"],
-            ),
-        ),
-        types.FunctionDeclaration(
-            name="finish",
-            description="Signal task completion after writing and validating output files.",
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={"summary": types.Schema(type=types.Type.STRING, description="Brief summary of approach and results")},
-                required=["summary"],
-            ),
-        ),
-    ])
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Execute a bash command in the workspace. Use for data exploration or running training scripts.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Bash command to execute",
+                        }
+                    },
+                    "required": ["command"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write or overwrite a file. Use to create Python scripts and output csv files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path, e.g. 'train_model.py' or 'predictions.csv'",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Full file contents",
+                        },
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "finish",
+                "description": "Signal task completion after writing and validating output files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Brief summary of approach and results",
+                        }
+                    },
+                    "required": ["summary"],
+                },
+            },
+        },
+    ]
 
-    config = types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tools=[tool_decl],
-    )
+    messages = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": task_prompt},
+    ]
 
     with log_path.open("w", encoding="utf-8") as log:
-        log.write(f"Model: {model_name} | Fallback: {model_fallback} | Max turns: {max_turns}\n\n=== START ===\n\n")
+        log.write(f"Model: {model} | Base URL: {base_url} | Max turns: {max_turns}\n\n=== START ===\n\n")
         log.flush()
-
-        for attempt_model in (model_name, model_fallback):
-            try:
-                chat = client.chats.create(model=attempt_model, config=config)
-                response = chat.send_message(task_prompt)
-                active_model = attempt_model
-                break
-            except Exception as exc:
-                log.write(f"Model {attempt_model} failed: {exc}\n")
-                if attempt_model == model_name:
-                    log.write(f"Falling back to {model_fallback}...\n")
-                    time.sleep(2)
-                    continue
-                log.write("All model attempts failed.\n")
-                return False
-
-        log.write(f"Using model: {active_model}\n\n")
-        log.flush()
-        print(f"[Gemini] Using {active_model}", flush=True)
 
         turn = 0
         for turn in range(1, max_turns + 1):
-            fcs = []
-            texts = []
-
-            if not response.candidates:
-                log.write(f"\nTurn {turn}: no candidates (safety filter?)\n")
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    temperature=0.2,
+                    max_tokens=4096,
+                )
+            except Exception as exc:
+                log.write(f"API ERROR turn {turn}: {exc}\n")
                 break
-            cand = response.candidates[0]
-            if not cand.content:
-                log.write(f"\nTurn {turn}: empty content\n")
-                break
 
-            for part in cand.content.parts:
-                if part.function_call is not None:
-                    fcs.append(part.function_call)
-                elif part.text:
-                    texts.append(part.text)
+            msg = response.choices[0].message
+            content = msg.content or ""
+            tool_calls = msg.tool_calls or []
 
-            if texts:
-                combined = " ".join(texts)
-                log.write(f"\n--- Turn {turn} ---\n{combined}\n")
+            if content:
+                log.write(f"\n--- Turn {turn} (text) ---\n{content}\n")
                 log.flush()
-                print(f"[Gemini turn {turn}] {combined[:200]}", flush=True)
+                print(f"[Agent turn {turn}] {content[:200]}", flush=True)
 
-            if not fcs:
+            if not tool_calls:
                 log.write(f"\nTurn {turn}: no tool calls, agent done.\n")
                 break
 
-            responses = []
-            for fc in fcs:
-                name = fc.name
-                args = {k: v for k, v in fc.args.items()}
+            # Append assistant message with tool calls
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in tool_calls
+                ],
+            })
+
+            for tc in tool_calls:
+                name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    args = {}
+
                 log.write(f"\n--- Turn {turn} tool: {name}({json.dumps(args, default=str)[:400]}) ---\n")
                 log.flush()
 
@@ -769,13 +804,11 @@ def run_gemini_loop(
                 log.write(f"({dt:.1f}s) {result[:2000]}\n")
                 log.flush()
 
-                responses.append(types.Part.from_function_response(name=name, response={"result": result[:MAX_RESULT_CHARS]}))
-
-            try:
-                response = chat.send_message(responses)
-            except Exception as exc:
-                log.write(f"ERROR turn {turn}: {exc}\n")
-                break
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result[:MAX_RESULT_CHARS],
+                })
 
         log.write(f"\n=== END after {turn} turns ===\n")
     return False
@@ -795,7 +828,7 @@ def main() -> int:
     # Same workspace layout as Claude agent so run.sh paths stay consistent
     workspace_dir = output_dir / "claude_science_ai_workspace"
     workspace_task_dir = workspace_dir / "task"
-    log_path = output_dir / "gemini_agent.log"
+    log_path = output_dir / "agent.log"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -810,7 +843,7 @@ def main() -> int:
 
     problem_type = detect_problem_type(task_config, workspace_task_dir)
     modality = detect_data_modality(workspace_task_dir, task_config)
-    print(f"[GeminiAgent] problem_type={problem_type}  modality={modality}", flush=True)
+    print(f"[Agent] problem_type={problem_type}  modality={modality}", flush=True)
 
     system_prompt = build_system_prompt(problem_type, modality, output_files, multi_file)
     task_prompt = build_task_prompt(task_dir, workspace_task_dir, workspace_dir, output_dir, output_path, output_files, multi_file)
@@ -820,8 +853,8 @@ def main() -> int:
 
     for attempt in (1, 2):
         alog = log_path if attempt == 1 else log_path.with_suffix(f".attempt{attempt}.log")
-        print(f"[GeminiAgent] Attempt {attempt}/2", flush=True)
-        run_gemini_loop(system_prompt, task_prompt, workspace_dir, output_dir, alog)
+        print(f"[Agent] Attempt {attempt}/2", flush=True)
+        run_agent_loop(system_prompt, task_prompt, workspace_dir, output_dir, alog)
 
         try:
             if multi_file:
@@ -836,14 +869,14 @@ def main() -> int:
                 validate_predictions(candidate, expected_columns=expected_cols, expected_ids=expected_ids, numeric_columns=numeric_cols)
                 if candidate != output_path:
                     shutil.copyfile(candidate, output_path)
-            print("[GeminiAgent] Output validated OK", flush=True)
+            print("[Agent] Output validated OK", flush=True)
             return 0
         except Exception as exc:
-            print(f"[GeminiAgent] Validation FAILED: {exc}", flush=True)
+            print(f"[Agent] Validation FAILED: {exc}", flush=True)
             if attempt == 1:
                 task_prompt += f"\n\n## PREVIOUS ATTEMPT FAILED\nError: {exc}\nFix column names, IDs, and numeric format. Try again."
             else:
-                msg = textwrap.dedent(f"""Gemini agent failed: {exc}\nLog: {log_path}""").strip()
+                msg = textwrap.dedent(f"""Agent failed: {exc}\nLog: {log_path}""").strip()
                 (output_dir / "baseline_error.txt").write_text(msg + "\n", encoding="utf-8")
                 print(msg, file=sys.stderr)
                 return 1

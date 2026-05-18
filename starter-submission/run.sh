@@ -228,8 +228,8 @@ if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     --output-dir "$OUTPUT_DIR" \
     --submission-dir "$SUBMISSION_DIR"
 
-elif [[ -n "${GEMINI_API_KEY:-}" ]]; then
-  echo "Using Gemini agent backend (gemini-2.5-flash-lite)" >&2
+elif [[ -n "${LLM_API_KEY:-}${OPENAI_API_KEY:-}" ]]; then
+  echo "Using LLM agent backend (OpenAI-compatible via run_gemini_agent.py)" >&2
   python3 "$SUBMISSION_DIR/scripts/run_gemini_agent.py" \
     --task "$TASK_DIR" \
     --output "$OUTPUT_PATH" \
