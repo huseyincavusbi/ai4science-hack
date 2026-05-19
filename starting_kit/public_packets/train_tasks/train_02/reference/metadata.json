@@ -1,0 +1,62 @@
+{
+  "baseline": 0.1,
+  "clean_weight": 0.5,
+  "direction": "higher",
+  "evaluation_mode": "backdoor_robust_digit_classification",
+  "generation_script": "scripts/build_science_ai_train02_backdoor_robustness.py",
+  "ideal": 1.0,
+  "metric": "defense_score",
+  "num_test_rows": 2600,
+  "num_train_decoy_rows": 150,
+  "num_train_poisoned_rows": 200,
+  "num_train_rows": 1000,
+  "num_train_shortcut_rows": 300,
+  "score_formula": "score = clip((defense_score - 0.1) / 0.9, 0, 1); defense_score = 0.5 * clean_acc + 0.3 * seen_trigger_acc + 0.2 * unseen_trigger_acc",
+  "seed": 17,
+  "seen_trigger_weight": 0.3,
+  "source_dataset": "MNIST handwritten digit images packaged as a public npz mirror",
+  "source_download": "https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz",
+  "task_id": "scienceai_digit_backdoor_robustness",
+  "test_label_counts": {
+    "0": 260,
+    "1": 260,
+    "2": 260,
+    "3": 260,
+    "4": 260,
+    "5": 260,
+    "6": 260,
+    "7": 260,
+    "8": 260,
+    "9": 260
+  },
+  "test_slice_counts": {
+    "clean": 1000,
+    "seen_trigger": 800,
+    "unseen_trigger": 800
+  },
+  "true_train_label_counts": {
+    "0": 100,
+    "1": 100,
+    "2": 100,
+    "3": 100,
+    "4": 100,
+    "5": 100,
+    "6": 100,
+    "7": 100,
+    "8": 100,
+    "9": 100
+  },
+  "unseen_trigger_weight": 0.2,
+  "visible_train_label_counts": {
+    "0": 100,
+    "1": 100,
+    "2": 100,
+    "3": 100,
+    "4": 100,
+    "5": 100,
+    "6": 100,
+    "7": 100,
+    "8": 100,
+    "9": 100
+  }
+}

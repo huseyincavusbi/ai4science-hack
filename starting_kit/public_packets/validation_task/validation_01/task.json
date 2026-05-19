@@ -1,0 +1,46 @@
+{
+  "task_id": "scienceai_synthetic_cate_estimation",
+  "track": "science_of_ai_ml",
+  "title": "Synthetic Treatment Effect Estimation",
+  "problem_type": "causal_effect_estimation",
+  "metric": "pehe",
+  "target": {
+    "name": "treatment_effect",
+    "description": "Conditional treatment-effect estimate for each synthetic model-improvement unit.",
+    "reference_column": "true_effect",
+    "train_label_required": false
+  },
+  "input_files": {
+    "train": "data/train.csv",
+    "test": "data/test.csv"
+  },
+  "output": {
+    "file": "predictions.csv",
+    "columns": ["id", "prediction"]
+  },
+  "scoring": {
+    "program": "scoring",
+    "command": "python /app/program/score.py /app/input/res /app/input/ref /app/output",
+    "evaluation_mode": "hidden_reference_predictions",
+    "scores": [
+      {"key": "score", "title": "Score", "sorting": "desc", "primary": true},
+      {"key": "metric_value", "title": "PEHE", "sorting": "asc"},
+      {"key": "pehe", "title": "PEHE", "sorting": "asc"},
+      {"key": "abs_pct_error_of_ate", "title": "Abs Pct ATE Error", "sorting": "asc"},
+      {"key": "predicted_ate", "title": "Predicted ATE", "sorting": "asc"}
+    ]
+  },
+  "feature_descriptions": {
+    "arch_family": "Binary architecture-family indicator.",
+    "model_scale": "Standardized model scale.",
+    "data_quality": "Input-data quality index.",
+    "pretrain_overlap": "Overlap between the run data and pretraining mixture.",
+    "baseline_loss": "Pre-intervention evaluation loss.",
+    "compute_budget": "Relative compute budget for the run.",
+    "eval_noise": "Estimated evaluation noise level.",
+    "treatment": "Observed adaptive-intervention assignment for training rows.",
+    "outcome": "Observed post-run improvement for training rows."
+  },
+  "domain_background": "Estimate per-unit treatment effects from observed treatment/outcome rows in a synthetic observational study of model-improvement runs. Treatment assignment is confounded by observed run features. The scorer uses PEHE against hidden per-unit effects as the primary metric and also reports absolute percent error of the average treatment effect.",
+  "allowed_external_resources": "Use public causal-inference, treatment-effect-estimation, and package documentation. Do not use hidden reference files."
+}

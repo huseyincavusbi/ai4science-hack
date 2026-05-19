@@ -16,3 +16,4 @@ claude_science_ai_workspace/
 eval-runs/
 .eval-runs/
 submissions/
+.env.secrets

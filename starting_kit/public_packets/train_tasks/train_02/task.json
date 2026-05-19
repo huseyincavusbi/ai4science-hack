@@ -1,0 +1,79 @@
+{
+  "task_id": "scienceai_digit_backdoor_robustness",
+  "track": "science_of_ai_ml",
+  "title": "Backdoor-Robust Digit Classification",
+  "problem_type": "classification",
+  "metric": "defense_score",
+  "target": {
+    "name": "label",
+    "reference_column": "target",
+    "description": "True digit label for held-out clean and artifact-stress images."
+  },
+  "input_files": {
+    "train": "data/train.csv",
+    "test": "data/test.csv",
+    "train_images": "data/train_images.npz",
+    "test_images": "data/test_images.npz"
+  },
+  "output": {
+    "file": "predictions.csv",
+    "columns": [
+      "id",
+      "prediction"
+    ]
+  },
+  "scoring": {
+    "program": "scoring",
+    "command": "python /app/program/score.py /app/input/res /app/input/ref /app/output",
+    "evaluation_mode": "hidden_reference_predictions",
+    "scores": [
+      {
+        "key": "score",
+        "title": "Score",
+        "sorting": "desc",
+        "primary": true
+      },
+      {
+        "key": "defense_score",
+        "title": "Defense Score",
+        "sorting": "desc"
+      },
+      {
+        "key": "clean_acc",
+        "title": "Clean Accuracy",
+        "sorting": "desc"
+      },
+      {
+        "key": "seen_trigger_acc",
+        "title": "Seen Artifact Accuracy",
+        "sorting": "desc"
+      },
+      {
+        "key": "unseen_trigger_acc",
+        "title": "Unseen Artifact Accuracy",
+        "sorting": "desc"
+      },
+      {
+        "key": "attack_success_rate",
+        "title": "Attack Success Rate",
+        "sorting": "asc"
+      },
+      {
+        "key": "metric_value",
+        "title": "Metric Value",
+        "sorting": "desc"
+      },
+      {
+        "key": "improvement",
+        "title": "Improvement",
+        "sorting": "desc"
+      }
+    ]
+  },
+  "feature_descriptions": {
+    "image_index": "Row index into the corresponding compressed image array.",
+    "label": "Visible training label. Some rows may contain localized visual artifacts that are spuriously correlated with labels, and a smaller subset may be mislabeled."
+  },
+  "domain_background": "Classify handwritten digit images from a small labeled set where localized visual artifacts may create shortcut correlations or mislabeled examples. The scorer rewards clean accuracy and robustness on hidden artifact-stress images.",
+  "allowed_external_resources": "Use public robustness, backdoor-defense, image-classification, and package documentation. Do not use hidden reference files, external labeled image datasets, or external labels."
+}
